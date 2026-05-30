@@ -1,10 +1,10 @@
-name: Extract Xiaomi Fastboot ROM
+name: Extract Xiaomi ROM
 
 on:
   workflow_dispatch:
     inputs:
       rom_url:
-        description: "Fastboot ROM download URL (direct .tgz / .zip)"
+        description: "Fastboot ROM or Recovery ROM download URL (direct .tgz / .zip)"
         required: true
         type: string
       image_type:
@@ -14,12 +14,6 @@ on:
         options:
           - vendor_boot
           - recovery
-      telegram_notify:
-        description: "Send Telegram notification"
-        required: false
-        default: "false"
-        type: boolean
-
 jobs:
   extract-rom:
     runs-on: ubuntu-latest
@@ -47,14 +41,14 @@ jobs:
             -O /tmp/pdgo.tar.gz
           sudo tar -xzf /tmp/pdgo.tar.gz -C /usr/local/bin payload-dumper-go
           sudo chmod +x /usr/local/bin/payload-dumper-go
-          
+
       - name: Download ROM
         run: |
           mkdir -p rom_download
-          # Ambil nama file asli dari URL
+
           ROM_FILENAME=$(basename "${ROM_URL%%\?*}")
           echo "ROM_FILENAME=$ROM_FILENAME" >> $GITHUB_ENV
-          echo "⬇️  Downloading: $ROM_FILENAME"
+          echo "Downloading: $ROM_FILENAME"
 
           aria2c \
             --console-log-level=warn \
@@ -68,19 +62,19 @@ jobs:
 
           echo "ROM_FILE=rom_download/$ROM_FILENAME" >> $GITHUB_ENV
           echo "Size: $(du -sh "rom_download/$ROM_FILENAME" | cut -f1)"
-          
+
       - name: Detect device name from ROM filename
         run: |
           FNAME="$ROM_FILENAME"
-          # Ambil bagian pertama sebelum underscore pertama = codename
+
           DEVICE_FROM_FNAME=$(echo "$FNAME" | cut -d'_' -f1)
-          echo "📛 Device from filename: $DEVICE_FROM_FNAME"
+          echo "Device from filename: $DEVICE_FROM_FNAME"
           echo "DEVICE=$DEVICE_FROM_FNAME" >> $GITHUB_ENV
 
       - name: Extract ROM package
         run: |
           mkdir -p "$OUT_DIR"
-          echo "📦 Extracting $ROM_FILE ..."
+          echo "Extracting $ROM_FILE ..."
 
           case "$ROM_FILE" in
             *.tgz|*.tar.gz)
@@ -93,7 +87,7 @@ jobs:
               7z x "$ROM_FILE" -o"$OUT_DIR" -y
               ;;
             *)
-              echo "⚠️  Unknown extension, trying 7z..."
+              echo "Unknown extension, trying 7z..."
               7z x "$ROM_FILE" -o"$OUT_DIR" -y
               ;;
           esac
@@ -102,7 +96,7 @@ jobs:
         run: |
           PAYLOAD=$(find "$OUT_DIR" -name "payload.bin" | head -1)
           if [ -n "$PAYLOAD" ]; then
-            echo "🔄 Found payload.bin, dumping..."
+            echo "Found payload.bin, dumping..."
             mkdir -p "$OUT_DIR/payload_out"
             payload-dumper-go -o "$OUT_DIR/payload_out" "$PAYLOAD"
           else
@@ -111,23 +105,22 @@ jobs:
 
       - name: Fallback detect device from build.prop
         run: |
-          # Jika nama file tidak sesuai pola (misal URL redirect), coba dari prop
           if [ -z "$DEVICE" ] || [ "$DEVICE" = "$(basename "$ROM_FILE")" ]; then
             PROP=$(find "$OUT_DIR" -name "build.prop" -o -name "default.prop" 2>/dev/null | head -1)
             if [ -n "$PROP" ]; then
               DEVICE_PROP=$(grep -m1 "ro.product.device\|ro.build.product" "$PROP" \
                 | head -1 | cut -d'=' -f2 | tr -d '[:space:]')
               if [ -n "$DEVICE_PROP" ]; then
-                echo "📋 Device from prop: $DEVICE_PROP"
+                echo "Device from prop: $DEVICE_PROP"
                 echo "DEVICE=$DEVICE_PROP" >> $GITHUB_ENV
               fi
             fi
           fi
-          echo "✅ Final device name: $DEVICE"
+          echo "Final device name: $DEVICE"
 
       - name: Find boot.img and ${{ github.event.inputs.image_type }}.img
         run: |
-          echo "🔍 Looking for images (device: $DEVICE, type: $IMAGE_TYPE)..."
+          echo "Looking for images (device: $DEVICE, type: $IMAGE_TYPE)..."
 
           find_img() {
             find "$OUT_DIR" -iname "${1}.img" 2>/dev/null | head -1
@@ -138,22 +131,21 @@ jobs:
 
           echo "───────────────────────────"
           if [ -n "$BOOT_IMG" ] && [ -f "$BOOT_IMG" ]; then
-            echo "✅ boot.img        : $BOOT_IMG ($(du -sh "$BOOT_IMG" | cut -f1))"
+            echo "boot.img        : $BOOT_IMG ($(du -sh "$BOOT_IMG" | cut -f1))"
           else
-            echo "❌ boot.img        : not found"
+            echo "boot.img        : not found"
           fi
 
           if [ -n "$TARGET_IMG" ] && [ -f "$TARGET_IMG" ]; then
-            echo "✅ ${IMAGE_TYPE}.img : $TARGET_IMG ($(du -sh "$TARGET_IMG" | cut -f1))"
+            echo "${IMAGE_TYPE}.img : $TARGET_IMG ($(du -sh "$TARGET_IMG" | cut -f1))"
           else
-            echo "❌ ${IMAGE_TYPE}.img : not found"
+            echo "${IMAGE_TYPE}.img : not found"
           fi
           echo "───────────────────────────"
 
           echo "BOOT_IMG=$BOOT_IMG"       >> $GITHUB_ENV
           echo "TARGET_IMG=$TARGET_IMG"   >> $GITHUB_ENV
 
-      # ── Collect output ─────────────────────────────────────────────────────
       - name: Collect images
         run: |
           mkdir -p output
@@ -163,9 +155,9 @@ jobs:
             local label=$2
             if [ -n "$path" ] && [ -f "$path" ]; then
               cp "$path" output/
-              echo "✅ Copied $label"
+              echo "Copied $label"
             else
-              echo "⚠️  $label not found, skipping"
+              echo "$label not found, skipping"
             fi
           }
 
@@ -173,41 +165,25 @@ jobs:
           copy_img "$TARGET_IMG" "${IMAGE_TYPE}.img"
 
           echo ""
-          echo "📁 Final output:"
+          echo "Final output:"
           ls -lh output/
 
-      # ── Upload (max 2 files) ───────────────────────────────────────────────
-      - name: Upload images
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.DEVICE }}-images
-          path: output/
-          if-no-files-found: warn
-          retention-days: 7
-
-      # ── Telegram ───────────────────────────────────────────────────────────
-      - name: Telegram notification
-        if: ${{ github.event.inputs.telegram_notify == 'true' }}
+      - name: Create tag and release
         env:
-          TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          FILES=$(ls output/ 2>/dev/null | tr '\n' ' ')
-          [ -z "$FILES" ] && STATUS="⚠️ Done \(no images found\)" || STATUS="✅ Done"
+          TAG="${DEVICE}-$(date -u +%Y%m%d)-${{ github.run_number }}"
+          echo "TAG=$TAG" >> $GITHUB_ENV
 
-          # Escape untuk MarkdownV2
-          ESC_DEVICE=$(echo "$DEVICE" | sed 's/[_\-\.]/\\&/g')
-          ESC_FILES=$(echo "${FILES:-none}" | sed 's/[_\-\.]/\\&/g')
+          ROM_VER=$(echo "$ROM_FILENAME" | cut -d'_' -f2)
 
-          MSG="*Xiaomi ROM Extractor*
-          Device: \`${ESC_DEVICE}\`
-          Type: \`${IMAGE_TYPE}\`
-          Status: ${STATUS}
-          Files: \`${ESC_FILES}\`
-          [Run \#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-
-          curl -s -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-            -d chat_id="$TG_CHAT" \
-            -d parse_mode="MarkdownV2" \
-            --data-urlencode "text=${MSG}"
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "${DEVICE} images (${ROM_VER})" \
+            --notes "**Device:** \`${DEVICE}\`
+          **ROM:** \`${ROM_FILENAME}\`
+          **Images:** \`boot.img\` + \`${IMAGE_TYPE}.img\`
+          **Source:** ${ROM_URL}" \
+            output/boot.img \
+            "output/${IMAGE_TYPE}.img"
             
