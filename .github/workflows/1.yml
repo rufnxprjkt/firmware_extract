@@ -175,7 +175,7 @@ jobs:
       - name: Set release tag and version
         run: |
           TAG="${DEVICE}-$(date -u +%Y%m%d)-${{ github.run_number }}"
-          ROM_VER=$(echo "$ROM_FILENAME" | cut -d'_' -f2)
+          ROM_VER=$(echo "$ROM_FILENAME" | grep -oP 'OS[\d.]+\.[A-Z0-9]+')
           echo "TAG=$TAG"         >> $GITHUB_ENV
           echo "ROM_VER=$ROM_VER" >> $GITHUB_ENV
 
@@ -192,5 +192,5 @@ jobs:
             **Device:** `${{ env.DEVICE }}`
             **ROM:** `${{ env.ROM_FILENAME }}`
             **Images:** `boot.img` + `${{ github.event.inputs.image_type }}.img`
-            **Source:** ${{ github.event.inputs.rom_url }}
+            **Source:** [{{ env.ROM_FILENAME }}](${{ github.event.inputs.rom_url }})
             
