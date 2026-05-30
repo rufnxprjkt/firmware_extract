@@ -183,7 +183,7 @@ jobs:
         uses: softprops/action-gh-release@v3.0.0
         with:
           tag_name: ${{ env.TAG }}
-          name: ${{ env.DEVICE }} images (${{ env.ROM_VER }})
+          name: ${{ env.DEVICE }} ${{ env.ROM_VER }}
           files: |
             output/boot.img
             output/${{ github.event.inputs.image_type }}.img
@@ -192,5 +192,5 @@ jobs:
             **Device:** `${{ env.DEVICE }}`
             **ROM:** `${{ env.ROM_FILENAME }}`
             **Images:** `boot.img` + `${{ github.event.inputs.image_type }}.img`
-            **Source:** [{{ env.ROM_FILENAME }}](${{ github.event.inputs.rom_url }})
+            **Source:** [${{ env.ROM_FILENAME }}](${{ github.event.inputs.rom_url }})
             
