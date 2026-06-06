@@ -14,6 +14,7 @@ on:
         options:
           - vendor_boot
           - recovery
+
 permissions:
   contents: write
   actions: read
@@ -37,15 +38,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             wget curl aria2 p7zip-full tar cpio brotli lz4 python3 file
-
-          # payload-dumper-go
-          PDGO_VER=$(curl -s https://api.github.com/repos/ssut/payload-dumper-go/releases/latest \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
-          wget -q "https://github.com/ssut/payload-dumper-go/releases/download/${PDGO_VER}/payload-dumper-go_${PDGO_VER##v}_linux_amd64.tar.gz" \
-            -O /tmp/pdgo.tar.gz
-          sudo tar -xzf /tmp/pdgo.tar.gz -C /usr/local/bin payload-dumper-go
-          sudo chmod +x /usr/local/bin/payload-dumper-go
-
+            
       - name: Download ROM
         run: |
           mkdir -p rom_download
@@ -69,99 +62,95 @@ jobs:
 
       - name: Detect device name from ROM filename
         run: |
-          FNAME="$ROM_FILENAME"
+          DEVICE=$(echo "$ROM_FILENAME" | sed 's/[_\-].*//' | tr '[:upper:]' '[:lower:]')
+          echo "Device from filename: $DEVICE"
+          echo "DEVICE=$DEVICE" >> $GITHUB_ENV
 
-          DEVICE_FROM_FNAME=$(echo "$FNAME" | cut -d'_' -f1)
-          echo "Device from filename: $DEVICE_FROM_FNAME"
-          echo "DEVICE=$DEVICE_FROM_FNAME" >> $GITHUB_ENV
-
-      - name: Extract ROM package
+      - name: Extract ROM — Fastboot
+        if: ${{ endsWith(env.ROM_FILENAME, '.tgz') || endsWith(env.ROM_FILENAME, '.tar.gz') }}
         run: |
           mkdir -p "$OUT_DIR"
-          echo "Extracting $ROM_FILE ..."
+          echo "Mode: tgz — extracting directly, no payload dump needed"
+          tar -xzf "$ROM_FILE" -C "$OUT_DIR" --strip-components=1
+          echo "EXTRACT_MODE=tgz" >> $GITHUB_ENV
 
-          case "$ROM_FILE" in
-            *.tgz|*.tar.gz)
-              tar -xzf "$ROM_FILE" -C "$OUT_DIR" --strip-components=1
-              ;;
-            *.zip)
-              7z x "$ROM_FILE" -o"$OUT_DIR" -y
-              ;;
-            *.7z)
-              7z x "$ROM_FILE" -o"$OUT_DIR" -y
-              ;;
-            *)
-              echo "Unknown extension, trying 7z..."
-              7z x "$ROM_FILE" -o"$OUT_DIR" -y
-              ;;
-          esac
-
-      - name: Dump payload.bin (if present)
+      - name: Extract ROM — Recovery
+        if: ${{ endsWith(env.ROM_FILENAME, '.zip') }}
         run: |
+          # payload-dumper-go
+          PDGO_VER=$(curl -s https://api.github.com/repos/ssut/payload-dumper-go/releases/latest \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          wget -q "https://github.com/ssut/payload-dumper-go/releases/download/${PDGO_VER}/payload-dumper-go_${PDGO_VER##v}_linux_amd64.tar.gz" \
+            -O /tmp/pdgo.tar.gz
+          sudo tar -xzf /tmp/pdgo.tar.gz -C /usr/local/bin payload-dumper-go
+          sudo chmod +x /usr/local/bin/payload-dumper-go
+          
+          mkdir -p "$OUT_DIR"
+          echo "Mode: zip — extracting then running payload-dumper-go"
+
+          # 1. Unzip
+          7z x "$ROM_FILE" -o"$OUT_DIR" -y
+
+          # 2. Dump payload.bin
           PAYLOAD=$(find "$OUT_DIR" -name "payload.bin" | head -1)
-          if [ -n "$PAYLOAD" ]; then
-            echo "Found payload.bin, dumping..."
-            mkdir -p "$OUT_DIR/payload_out"
-            payload-dumper-go -o "$OUT_DIR/payload_out" "$PAYLOAD"
-          else
-            echo "No payload.bin, skipping."
+          if [ -z "$PAYLOAD" ]; then
+            echo "::error::payload.bin not found inside ZIP — not a valid Xiaomi OTA/fastboot zip?"
+            exit 1
           fi
+
+          echo "Found payload.bin: $PAYLOAD"
+          mkdir -p "$OUT_DIR/payload_out"
+          payload-dumper-go -o "$OUT_DIR/payload_out" "$PAYLOAD"
+
+          echo "EXTRACT_MODE=zip" >> $GITHUB_ENV
 
       - name: Fallback detect device from build.prop
         run: |
-          if [ -z "$DEVICE" ] || [ "$DEVICE" = "$(basename "$ROM_FILE")" ]; then
-            PROP=$(find "$OUT_DIR" -name "build.prop" -o -name "default.prop" 2>/dev/null | head -1)
-            if [ -n "$PROP" ]; then
-              DEVICE_PROP=$(grep -m1 "ro.product.device\|ro.build.product" "$PROP" \
-                | head -1 | cut -d'=' -f2 | tr -d '[:space:]')
-              if [ -n "$DEVICE_PROP" ]; then
-                echo "Device from prop: $DEVICE_PROP"
-                echo "DEVICE=$DEVICE_PROP" >> $GITHUB_ENV
-              fi
+          PROP=$(find "$OUT_DIR" -name "build.prop" -o -name "default.prop" 2>/dev/null | head -1)
+          if [ -n "$PROP" ]; then
+            DEVICE_PROP=$(grep -m1 "ro.product.device\|ro.build.product" "$PROP" \
+              | head -1 | cut -d'=' -f2 | tr -d '[:space:]')
+            if [ -n "$DEVICE_PROP" ]; then
+              echo "Device from prop: $DEVICE_PROP (overrides filename)"
+              echo "DEVICE=$DEVICE_PROP" >> $GITHUB_ENV
             fi
           fi
-          echo "Final device name: $DEVICE"
+          echo "Final device: $DEVICE"
 
-      - name: Find boot.img and ${{ github.event.inputs.image_type }}.img
+      - name: Find boot.img and target image
         run: |
-          echo "Looking for images (device: $DEVICE, type: $IMAGE_TYPE)..."
+          echo "Searching images (mode: $EXTRACT_MODE, type: $IMAGE_TYPE)..."
+
+          # For recovery
+          SEARCH_DIR="$OUT_DIR"
+          [ "$EXTRACT_MODE" = "zip" ] && SEARCH_DIR="$OUT_DIR/payload_out"
 
           find_img() {
-            find "$OUT_DIR" -iname "${1}.img" 2>/dev/null | head -1
+            find "$SEARCH_DIR" -iname "${1}.img" 2>/dev/null | head -1
           }
 
           BOOT_IMG=$(find_img "boot")
           TARGET_IMG=$(find_img "$IMAGE_TYPE")
 
           echo "───────────────────────────"
-          if [ -n "$BOOT_IMG" ] && [ -f "$BOOT_IMG" ]; then
-            echo "boot.img        : $BOOT_IMG ($(du -sh "$BOOT_IMG" | cut -f1))"
-          else
-            echo "boot.img        : not found"
-          fi
-
-          if [ -n "$TARGET_IMG" ] && [ -f "$TARGET_IMG" ]; then
-            echo "${IMAGE_TYPE}.img : $TARGET_IMG ($(du -sh "$TARGET_IMG" | cut -f1))"
-          else
-            echo "${IMAGE_TYPE}.img : not found"
-          fi
+          [ -f "$BOOT_IMG" ]   && echo "boot.img        : $BOOT_IMG ($(du -sh "$BOOT_IMG" | cut -f1))"   || echo "boot.img        : NOT FOUND"
+          [ -f "$TARGET_IMG" ] && echo "${IMAGE_TYPE}.img : $TARGET_IMG ($(du -sh "$TARGET_IMG" | cut -f1))" || echo "${IMAGE_TYPE}.img : NOT FOUND"
           echo "───────────────────────────"
 
-          echo "BOOT_IMG=$BOOT_IMG"       >> $GITHUB_ENV
-          echo "TARGET_IMG=$TARGET_IMG"   >> $GITHUB_ENV
+          echo "BOOT_IMG=$BOOT_IMG"     >> $GITHUB_ENV
+          echo "TARGET_IMG=$TARGET_IMG" >> $GITHUB_ENV
 
       - name: Collect images
         run: |
           mkdir -p output
 
           copy_img() {
-            local path=$1
-            local label=$2
-            if [ -n "$path" ] && [ -f "$path" ]; then
+            local path=$1 label=$2
+            if [ -f "$path" ]; then
               cp "$path" output/
-              echo "Copied $label"
+              echo "Copied $label ($(du -sh "$path" | cut -f1))"
             else
-              echo "$label not found, skipping"
+              echo "$label not found — skipping"
             fi
           }
 
@@ -169,28 +158,54 @@ jobs:
           copy_img "$TARGET_IMG" "${IMAGE_TYPE}.img"
 
           echo ""
-          echo "Final output:"
+          echo "=== Final output/ ==="
           ls -lh output/
+
+          # Fail if neither image was collected
+          [ "$(ls -A output/)" ] || { echo "::error::No images collected!"; exit 1; }
 
       - name: Set release tag and version
         run: |
           TAG="${DEVICE}-$(date -u +%Y%m%d)-${{ github.run_number }}"
-          ROM_VER=$(echo "$ROM_FILENAME" | grep -oP 'OS[\d.]+\.[A-Z0-9]+')
-          echo "TAG=$TAG"         >> $GITHUB_ENV
-          echo "ROM_VER=$ROM_VER" >> $GITHUB_ENV
+
+          if [ "$EXTRACT_MODE" = "zip" ]; then
+            ROM_VER=$(echo "$ROM_FILENAME" | grep -oP '(OS|V)[\d.]+[A-Z0-9]+' | head -1)
+            ROM_TYPE="Recovery (OTA ZIP)"
+          else
+            ROM_VER=$(echo "$ROM_FILENAME" | grep -oP '(OS|V)[\d.]+[A-Z0-9]+' | head -1)
+            ROM_PLATFORM=$(echo "$ROM_FILENAME" | grep -oiP '(qcom|mtk|global|cn|eea|in|ru)(?=[\._])' | head -1 | tr '[:lower:]' '[:upper:]')
+            ROM_TYPE="Fastboot (TGZ)${ROM_PLATFORM:+ — $ROM_PLATFORM}"
+          fi
+
+          [ -z "$ROM_VER" ] && ROM_VER="unknown"
+
+          echo "TAG=$TAG"               >> $GITHUB_ENV
+          echo "ROM_VER=$ROM_VER"       >> $GITHUB_ENV
+          echo "ROM_TYPE=$ROM_TYPE"     >> $GITHUB_ENV
 
       - name: Create release
         uses: softprops/action-gh-release@v3.0.0
         with:
           tag_name: ${{ env.TAG }}
-          name: ${{ env.DEVICE }} ${{ env.ROM_VER }}
+          name: "${{ env.DEVICE }} — ${{ env.ROM_VER }}"
           files: |
             output/boot.img
             output/${{ github.event.inputs.image_type }}.img
           generate_release_notes: false
           body: |
-            **Device:** `${{ env.DEVICE }}`
-            **ROM:** `${{ env.ROM_FILENAME }}`
-            **Images:** `boot.img` + `${{ github.event.inputs.image_type }}.img`
-            **Source:** [${{ env.ROM_FILENAME }}](${{ github.event.inputs.rom_url }})
-            
+            ## ROM Info
+            | Field        | Value |
+            |---|---|
+            | **Device**   | `${{ env.DEVICE }}` |
+            | **Version**  | `${{ env.ROM_VER }}` |
+            | **Type**     | `${{ env.ROM_TYPE }}` |
+            | **Filename** | `${{ env.ROM_FILENAME }}` |
+
+            ## Extracted Images
+            | Image | Description |
+            |---|---|
+            | `boot.img` | Boot image |
+            | `${{ github.event.inputs.image_type }}.img` | ${{ github.event.inputs.image_type == 'vendor_boot' && 'Vendor boot image' || 'Recovery image' }} |
+
+            ## 🔗 Source
+            [${{ env.ROM_FILENAME }}](${{ env.ROM_URL }})
